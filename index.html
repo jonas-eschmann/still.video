@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>still.video</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            overscroll-behavior: none;
+        }
+        #editor-container {
+            position: relative;
+            width: 100%;
+            max-width: 900px;
+            aspect-ratio: 16 / 9;
+            margin: auto;
+            background-color: #1a1a1a;
+        }
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            border-radius: 0.5rem;
+        }
+        #interaction-canvas {
+            cursor: crosshair;
+            z-index: 10;
+        }
+        .loader {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #3498db;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 20;
+        }
+        @keyframes spin {
+            0% { transform: translate(-50%, -50%) rotate(0deg); }
+            100% { transform: translate(-50%, -50%) rotate(360deg); }
+        }
+    </style>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body class="bg-gray-900 text-gray-200 flex flex-col items-center justify-center min-h-screen p-4">
+
+    <div class="w-full max-w-4xl mx-auto">
+        <h1 class="text-3xl font-bold text-center mb-2 text-white">still.video: Chronophotography Editor</h1>
+        <p class="text-center text-gray-400 mb-6">Load a video, select a base frame, then paint over subjects to freeze them in time. If you have a high fps video please reduce the framerate first (make it a slow motion video) to not lose frames.</p>
+
+        <!-- Video Upload -->
+        <div id="upload-container" class="w-full max-w-lg mx-auto mb-6">
+            <label for="video-input" class="block mb-2 text-sm font-medium text-gray-300">Upload Video</label>
+            <input type="file" id="video-input" accept="video/*" class="block w-full text-sm text-gray-400 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-500 file:text-white hover:file:bg-blue-600 transition-colors">
+        </div>
+
+        <!-- Editor UI -->
+        <div id="editor-ui" class="hidden w-full">
+            <div id="editor-container" class="rounded-lg shadow-2xl overflow-hidden mb-4 relative bg-gray-800">
+                <canvas id="composition-canvas" style="z-index: 1;"></canvas>
+                <canvas id="interaction-canvas" style="z-index: 5;"></canvas>
+                <div id="loader" class="loader hidden"></div>
+                <div id="message-box" class="absolute inset-0 bg-black bg-opacity-70 flex items-center justify-center text-white text-lg p-8 text-center z-30 hidden">
+                    Processing video... This may take a moment.
+                </div>
+            </div>
+
+            <!-- Controls -->
+            <div class="bg-gray-800 p-4 rounded-lg shadow-lg">
+                <div class="flex items-center justify-between mb-4">
+                    <button id="prev-frame" class="px-4 py-2 bg-gray-700 rounded-md hover:bg-gray-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">&lt; Prev</button>
+                    <div class="text-center">
+                        <div id="frame-info" class="font-mono">Frame: 0 / 0</div>
+                        <div id="time-info" class="font-mono text-sm text-gray-400">0.00s</div>
+                    </div>
+                    <button id="next-frame" class="px-4 py-2 bg-gray-700 rounded-md hover:bg-gray-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed">Next &gt;</button>
+                </div>
+                
+                 <div class="flex items-center justify-center space-x-4">
+                    <button id="set-base-frame-btn" class="px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 transition-colors">Set as Base Frame</button>
+                    <label for="brush-size" class="text-sm">Brush:</label>
+                    <input type="range" id="brush-size" min="10" max="200" value="50" class="w-1/4">
+                    <button id="undo-btn" class="px-4 py-2 bg-yellow-600 text-white rounded-md hover:bg-yellow-700 transition-colors">Undo</button>
+                    <button id="download-btn" class="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors">Download</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <video id="video-source" style="display: none;" muted playsinline></video>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', () => {
+            const videoInput = document.getElementById('video-input');
+            const editorUI = document.getElementById('editor-ui');
+            const uploadContainer = document.getElementById('upload-container');
+            const video = document.getElementById('video-source');
+            const compositionCanvas = document.getElementById('composition-canvas');
+            const interactionCanvas = document.getElementById('interaction-canvas');
+            const compositionCtx = compositionCanvas.getContext('2d');
+            const interactionCtx = interactionCanvas.getContext('2d');
+            const prevFrameBtn = document.getElementById('prev-frame');
+            const nextFrameBtn = document.getElementById('next-frame');
+            const setBaseFrameBtn = document.getElementById('set-base-frame-btn');
+            const frameInfo = document.getElementById('frame-info');
+            const timeInfo = document.getElementById('time-info');
+            const brushSizeSlider = document.getElementById('brush-size');
+            const downloadBtn = document.getElementById('download-btn');
+            const undoBtn = document.getElementById('undo-btn');
+            const loader = document.getElementById('loader');
+            const messageBox = document.getElementById('message-box');
+
+            let isDrawing = false;
+            let isSeeking = false;
+            let baseFrameSet = false;
+            let frameRate = 30;
+            let frameDuration = 1 / frameRate;
+            let totalFrames = 0;
+            let lastPos = { x: 0, y: 0 };
+            
+            const maskCanvas = document.createElement('canvas');
+            const maskCtx = maskCanvas.getContext('2d');
+            const tempFrameCanvas = document.createElement('canvas');
+            const tempFrameCtx = tempFrameCanvas.getContext('2d');
+
+            const historyStack = [];
+
+            videoInput.addEventListener('change', handleVideoUpload);
+            video.addEventListener('loadedmetadata', analyzeVideo);
+            video.addEventListener('seeked', onVideoSeeked);
+            
+            interactionCanvas.addEventListener('mousedown', startDrawing);
+            interactionCanvas.addEventListener('mousemove', draw);
+            interactionCanvas.addEventListener('mouseup', stopDrawing);
+            interactionCanvas.addEventListener('mouseout', stopDrawing);
+
+            prevFrameBtn.addEventListener('click', () => navigateFrames(-1));
+            nextFrameBtn.addEventListener('click', () => navigateFrames(1));
+            setBaseFrameBtn.addEventListener('click', setBaseFrame);
+            downloadBtn.addEventListener('click', downloadImage);
+            undoBtn.addEventListener('click', undoLastAction);
+
+            function handleVideoUpload(event) {
+                const file = event.target.files[0];
+                if (file) {
+                    baseFrameSet = false;
+                    historyStack.length = 0;
+                    setBaseFrameBtn.disabled = false;
+                    setBaseFrameBtn.textContent = 'Set as Base Frame';
+                    setBaseFrameBtn.classList.add('bg-indigo-600', 'hover:bg-indigo-700');
+                    setBaseFrameBtn.classList.remove('bg-gray-500', 'cursor-not-allowed');
+                    compositionCtx.clearRect(0, 0, compositionCanvas.width, compositionCanvas.height);
+
+                    const videoURL = URL.createObjectURL(file);
+                    video.src = videoURL;
+                    editorUI.classList.remove('hidden');
+                    uploadContainer.classList.add('hidden');
+                    messageBox.textContent = 'Analyzing video...';
+                    messageBox.classList.remove('hidden');
+                }
+            }
+
+            function analyzeVideo() {
+                if (!video.requestVideoFrameCallback) {
+                    console.warn("requestVideoFrameCallback is not supported. Falling back to 30 FPS.");
+                    setupEditorAndSeekToStart();
+                    return;
+                }
+
+                messageBox.textContent = 'Analyzing frame rate...';
+                let frameCount = 0;
+                let startTime = 0;
+
+                const frameCounterCallback = (now, metadata) => {
+                    if (startTime === 0) {
+                        startTime = now;
+                    }
+                    frameCount++;
+                    const elapsed = (now - startTime) / 1000;
+
+                    // Sample for about half a second or 30 frames
+                    if (elapsed >= 0.5 || frameCount > 30) {
+                        video.pause();
+                        const calculatedFps = frameCount / elapsed;
+                        // Use a fallback for unreasonable values, otherwise use the calculation
+                        frameRate = (calculatedFps > 10 && calculatedFps < 121) ? calculatedFps : 30;
+                        frameDuration = 1 / frameRate;
+                        console.log(`Calculated FPS: ${frameRate.toFixed(2)}`);
+                        
+                        setupEditorAndSeekToStart();
+                    } else {
+                        video.requestVideoFrameCallback(frameCounterCallback);
+                    }
+                };
+
+                const onSeekedForAnalysis = () => {
+                    video.removeEventListener('seeked', onSeekedForAnalysis);
+                    video.play().catch(e => console.error("Playback for analysis failed:", e));
+                    video.requestVideoFrameCallback(frameCounterCallback);
+                }
+                video.addEventListener('seeked', onSeekedForAnalysis);
+                video.currentTime = 0;
+            }
+
+            function setupEditorAndSeekToStart() {
+                const videoWidth = video.videoWidth;
+                const videoHeight = video.videoHeight;
+
+                [compositionCanvas, interactionCanvas, maskCanvas, tempFrameCanvas].forEach(c => {
+                    c.width = videoWidth;
+                    c.height = videoHeight;
+                });
+                
+                totalFrames = Math.floor(video.duration * frameRate);
+                
+                video.currentTime = 0;
+                messageBox.textContent = 'Ready. Select a base frame.';
+            }
+
+            function onVideoSeeked() {
+                isSeeking = false;
+                if (messageBox.textContent !== 'Ready. Select a base frame.') {
+                     messageBox.classList.add('hidden');
+                }
+                loader.classList.add('hidden');
+                redrawInteractionCanvas();
+                updateUI();
+            }
+
+            function redrawInteractionCanvas() {
+                interactionCtx.clearRect(0, 0, interactionCanvas.width, interactionCanvas.height);
+                interactionCtx.drawImage(video, 0, 0, interactionCanvas.width, interactionCanvas.height);
+                if (baseFrameSet) {
+                    interactionCtx.globalAlpha = 0.5;
+                    interactionCtx.drawImage(compositionCanvas, 0, 0);
+                    interactionCtx.globalAlpha = 1.0;
+                }
+            }
+
+            function setBaseFrame() {
+                if (baseFrameSet) return;
+                baseFrameSet = true;
+                compositionCtx.drawImage(video, 0, 0, compositionCanvas.width, compositionCanvas.height);
+                saveHistory();
+                setBaseFrameBtn.disabled = true;
+                setBaseFrameBtn.textContent = 'Base Frame Set';
+                setBaseFrameBtn.classList.remove('bg-indigo-600', 'hover:bg-indigo-700');
+                setBaseFrameBtn.classList.add('bg-gray-500', 'cursor-not-allowed');
+                messageBox.classList.add('hidden');
+                redrawInteractionCanvas();
+            }
+
+            function navigateFrames(direction) {
+                if (isSeeking) return;
+                isSeeking = true;
+                loader.classList.remove('hidden');
+                let nextTime = video.currentTime + (direction * frameDuration);
+                video.currentTime = Math.max(0, Math.min(nextTime, video.duration));
+            }
+
+            function updateUI() {
+                const currentFrame = Math.round(video.currentTime * frameRate);
+                frameInfo.textContent = `Frame: ${currentFrame} / ${totalFrames}`;
+                timeInfo.textContent = `${video.currentTime.toFixed(2)}s`;
+                prevFrameBtn.disabled = video.currentTime <= 0.01 || isSeeking;
+                nextFrameBtn.disabled = video.currentTime >= video.duration || isSeeking;
+            }
+
+            function startDrawing(e) {
+                if (!baseFrameSet || isSeeking) return;
+                isDrawing = true;
+                const pos = getMousePos(interactionCanvas, e);
+                [lastPos.x, lastPos.y] = [pos.x, pos.y];
+                maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+            }
+
+            function draw(e) {
+                if (!isDrawing) return;
+                const pos = getMousePos(interactionCanvas, e);
+                maskCtx.beginPath();
+                maskCtx.strokeStyle = 'white';
+                maskCtx.lineWidth = brushSizeSlider.value;
+                maskCtx.lineCap = 'round';
+                maskCtx.lineJoin = 'round';
+                maskCtx.moveTo(lastPos.x, lastPos.y);
+                maskCtx.lineTo(pos.x, pos.y);
+                maskCtx.stroke();
+                
+                interactionCtx.beginPath();
+                interactionCtx.strokeStyle = 'rgba(255, 255, 0, 0.7)';
+                interactionCtx.lineWidth = brushSizeSlider.value;
+                interactionCtx.lineCap = 'round';
+                interactionCtx.lineJoin = 'round';
+                interactionCtx.moveTo(lastPos.x, lastPos.y);
+                interactionCtx.lineTo(pos.x, pos.y);
+                interactionCtx.stroke();
+                [lastPos.x, lastPos.y] = [pos.x, pos.y];
+            }
+
+            function stopDrawing() {
+                if (!isDrawing) return;
+                isDrawing = false;
+                applyMask();
+            }
+
+            function applyMask() {
+                tempFrameCtx.clearRect(0, 0, tempFrameCanvas.width, tempFrameCanvas.height);
+                tempFrameCtx.drawImage(video, 0, 0, tempFrameCanvas.width, tempFrameCanvas.height);
+                tempFrameCtx.globalCompositeOperation = 'destination-in';
+                tempFrameCtx.drawImage(maskCanvas, 0, 0);
+                tempFrameCtx.globalCompositeOperation = 'source-over';
+                compositionCtx.drawImage(tempFrameCanvas, 0, 0);
+                redrawInteractionCanvas();
+                saveHistory();
+            }
+            
+            function getMousePos(canvas, evt) {
+                const rect = canvas.getBoundingClientRect();
+                const scaleX = canvas.width / rect.width;
+                const scaleY = canvas.height / rect.height;
+                return {
+                    x: (evt.clientX - rect.left) * scaleX,
+                    y: (evt.clientY - rect.top) * scaleY
+                };
+            }
+            
+            function downloadImage() {
+                const link = document.createElement('a');
+                link.download = 'chronophotograph.png';
+                link.href = compositionCanvas.toDataURL('image/png');
+                link.click();
+            }
+            
+            function saveHistory() {
+                const imageData = compositionCtx.getImageData(0, 0, compositionCanvas.width, compositionCanvas.height);
+                historyStack.push(imageData);
+            }
+
+            function undoLastAction() {
+                if (historyStack.length > 1) {
+                    historyStack.pop();
+                    const lastState = historyStack[historyStack.length - 1];
+                    compositionCtx.putImageData(lastState, 0, 0);
+                    redrawInteractionCanvas();
+                } else {
+                    console.log("Cannot undo further.");
+                }
+            }
+        });
+    </script>
+</body>
+</html>
+
